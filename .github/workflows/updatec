@@ -1,0 +1,155 @@
+name: Update Playlist Cookies
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'    # every 6 hours
+  workflow_dispatch:         # manual trigger
+
+jobs:
+  update-playlist:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }}   # important for gist push + repo push
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Extract Cookie and Update zstar.m3u
+        env:
+          GIST_ID: ${{ vars.GIST_ID }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          python << 'EOF'
+          import requests
+          import re
+          import os
+          import sys
+          import json
+
+          # ───────────────────────────────────────────────
+          #   CONFIG
+          # ───────────────────────────────────────────────
+          WORKER_URL    = "https://jtv.pfy.workers.dev"
+          M3U_FILENAME  = "zstar.m3u"
+          GIST_ID       = os.getenv("GIST_ID")
+          GH_TOKEN      = os.getenv("GH_TOKEN")
+
+          if not GIST_ID or not GH_TOKEN:
+              print("Error: GIST_ID or GH_TOKEN environment variable is missing.")
+              sys.exit(1)
+
+          HEADERS = {
+              "Authorization": f"token {GH_TOKEN}",
+              "Accept": "application/vnd.github.v3+json"
+          }
+
+          # ───────────────────────────────────────────────
+          # 1. Get fresh cookie from worker
+          # ───────────────────────────────────────────────
+          try:
+              resp = requests.get(WORKER_URL, timeout=12)
+              resp.raise_for_status()
+
+              match = re.search(r'__hdnea__=([^"\'\s&]+)', resp.text)
+              if not match:
+                  print("Error: Could not find __hdnea__ in worker response.")
+                  print("Response snippet:", resp.text[:400])
+                  sys.exit(1)
+
+              cookie_val = match.group(1)
+              token_str = f"__hdnea__={cookie_val}"
+              print(f"Extracted token: {token_str}")
+
+          except Exception as e:
+              print(f"Failed to get cookie from worker: {e}")
+              sys.exit(1)
+
+          # ───────────────────────────────────────────────
+          # 2. Download current gist content
+          # ───────────────────────────────────────────────
+          gist_url = f"https://api.github.com/gists/{GIST_ID}"
+          try:
+              r = requests.get(gist_url, headers=HEADERS, timeout=10)
+              r.raise_for_status()
+              gist_data = r.json()
+
+              if M3U_FILENAME not in gist_data["files"]:
+                  print(f"Error: File '{M3U_FILENAME}' not found in gist.")
+                  sys.exit(1)
+
+              current_content = gist_data["files"][M3U_FILENAME]["content"]
+              lines = current_content.splitlines()
+
+          except Exception as e:
+              print(f"Failed to read gist: {e}")
+              sys.exit(1)
+
+          # ───────────────────────────────────────────────
+          # 3. Update links in playlist
+          # ───────────────────────────────────────────────
+          updated_lines = []
+          updated_count = 0
+
+          for line in lines:
+              stripped = line.strip()
+              if not stripped or stripped.startswith("#"):
+                  updated_lines.append(line)
+                  continue
+
+              if (stripped.startswith("http") and 
+                  (stripped.endswith(".mpd") or ".mpd?" in stripped or 
+                   stripped.endswith(".m3u8") or ".m3u8?" in stripped)):
+
+                  # Remove old token if exists
+                  clean = re.sub(r'([?&])__hdnea__=[^&]*', '', stripped)
+                  sep = "&" if "?" in clean else "?"
+                  new_url = f"{clean}{sep}{token_str}"
+                  updated_lines.append(new_url)
+                  updated_count += 1
+              else:
+                  updated_lines.append(line)
+
+          print(f"Updated {updated_count} stream URLs.")
+
+          # ───────────────────────────────────────────────
+          # 4. Update gist (only if changed)
+          # ───────────────────────────────────────────────
+          new_content = "\n".join(updated_lines).rstrip() + "\n"
+          if new_content == current_content:
+              print("No changes detected in playlist.")
+              sys.exit(0)
+
+          update_payload = {
+              "files": {
+                  M3U_FILENAME: {
+                      "content": new_content
+                  }
+              }
+          }
+
+          try:
+              resp = requests.patch(gist_url, headers=HEADERS, json=update_payload, timeout=10)
+              resp.raise_for_status()
+              print(f"Successfully updated gist → {M3U_FILENAME}")
+          except Exception as e:
+              print(f"Failed to update gist: {e}")
+              sys.exit(1)
+
+          EOF
+
+      - name: Commit changes to repository (if any)
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add zstar.m3u || true
+          git commit -m "chore: refreshed zstar.m3u cookies [skip ci]" || echo "No changes to commit"
+          git push || echo "Push not needed"
