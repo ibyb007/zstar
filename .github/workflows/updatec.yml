@@ -52,6 +52,12 @@ jobs:
               "Accept": "application/vnd.github.v3+json"
           }
 
+          # Fixed properties for all channels (edit if needed)
+          LICENSE_TYPE = "org.w3.clearkey"
+          LICENSE_KEY  = "6f7b7241b2935a909d389fe318e5baaa:65783311644973348f359dc154bb41db"
+          USER_AGENT   = "plaYtv/7.1.3 (Linux;Android 13) ygx/69.1 ExoPlayerLib/824.0"
+          MANIFEST_TYPE = "mpd"
+
           # ───────────────────────────────────────────────
           # 1. Get fresh cookie from worker
           # ───────────────────────────────────────────────
@@ -94,31 +100,53 @@ jobs:
               sys.exit(1)
 
           # ───────────────────────────────────────────────
-          # 3. Update links in playlist
+          # 3. Process and rebuild playlist
           # ───────────────────────────────────────────────
           updated_lines = []
           updated_count = 0
+          current_extinf = None
 
           for line in lines:
               stripped = line.strip()
-              if not stripped or stripped.startswith("#"):
+
+              # Keep blank lines and comments
+              if not stripped or stripped.startswith("#") and not stripped.startswith("#EXTINF"):
                   updated_lines.append(line)
                   continue
 
+              # Remember current channel metadata
+              if stripped.startswith("#EXTINF"):
+                  current_extinf = line.rstrip()  # keep original spacing/style
+                  updated_lines.append(current_extinf)
+                  continue
+
+              # Process stream URL line
               if (stripped.startswith("http") and 
                   (stripped.endswith(".mpd") or ".mpd?" in stripped or 
-                   stripped.endswith(".m3u8") or ".m3u8?" in stripped)):
+                   stripped.endswith(".m3u8") or ".m3u8?" in stripped)) and current_extinf:
 
-                  # Remove old token if exists
-                  clean = re.sub(r'([?&])__hdnea__=[^&]*', '', stripped)
-                  sep = "&" if "?" in clean else "?"
-                  new_url = f"{clean}{sep}{token_str}"
+                  # Clean old token
+                  clean_url = re.sub(r'([?&])__hdnea__=[^&]*', '', stripped).rstrip()
+
+                  # Add fresh token
+                  sep = "&" if "?" in clean_url else "?"
+                  new_url = f"{clean_url}{sep}{token_str}"
+
+                  # Add DRM + manifest + UA properties (Kodi/InputStream format)
+                  updated_lines.append(f"#KODIPROP:inputstream.adaptive.license_type={LICENSE_TYPE}")
+                  updated_lines.append(f"#KODIPROP:inputstream.adaptive.license_key={LICENSE_KEY}")
+                  updated_lines.append(f"#KODIPROP:inputstream.adaptive.manifest_type={MANIFEST_TYPE}")
+                  updated_lines.append(f"#EXTVLCOPT:http-user-agent={USER_AGENT}")
                   updated_lines.append(new_url)
+
                   updated_count += 1
+                  current_extinf = None  # reset after processing one channel
+
               else:
+                  # Non-stream line — keep as is
                   updated_lines.append(line)
 
-          print(f"Updated {updated_count} stream URLs.")
+          print(f"Updated {updated_count} stream entries with fresh token and properties.")
 
           # ───────────────────────────────────────────────
           # 4. Update gist (only if changed)
@@ -151,5 +179,5 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add zstar.m3u || true
-          git commit -m "chore: refreshed zstar.m3u cookies [skip ci]" || echo "No changes to commit"
+          git commit -m "chore: refreshed zstar.m3u cookies & format [skip ci]" || echo "No changes to commit"
           git push || echo "Push not needed"
