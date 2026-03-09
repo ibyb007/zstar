@@ -38,7 +38,7 @@ jobs:
           # ───────────────────────────────────────────────
           #   CONFIG
           # ───────────────────────────────────────────────
-          WORKER_URL    = "https://jtv.pfy.workers.dev"
+          WORKER_URL    = "https://zstar.pfy.workers.dev"
           M3U_FILENAME  = "zstar.m3u"
           GIST_ID       = os.getenv("GIST_ID")
           GH_TOKEN      = os.getenv("GH_TOKEN")
