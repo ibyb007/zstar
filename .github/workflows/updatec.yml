@@ -2,26 +2,8 @@ name: Update Playlist Cookies
 
 on:
   schedule:
-    - cron: '0 */6 * * *'      # every 6 hours
-
-  workflow_dispatch:
-    inputs:
-      force_update:
-        description: 'Force update even if no changes detected (yes/no)'
-        required: false
-        default: 'no'
-        type: choice
-        options:
-          - 'no'
-          - 'yes'
-      dry_run:
-        description: 'Dry run - show changes but do not update gist/repo (yes/no)'
-        required: false
-        default: 'no'
-        type: choice
-        options:
-          - 'no'
-          - 'yes'
+    - cron: '0 */6 * * *'    # every 6 hours
+  workflow_dispatch:         # manual trigger
 
 jobs:
   update-playlist:
@@ -31,7 +13,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}   # important for gist push + repo push
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -45,14 +27,13 @@ jobs:
         env:
           GIST_ID: ${{ vars.GIST_ID }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          FORCE_UPDATE: ${{ github.event.inputs.force_update || 'no' }}
-          DRY_RUN:     ${{ github.event.inputs.dry_run     || 'no' }}
         run: |
           python << 'EOF'
           import requests
           import re
           import os
           import sys
+          import json
 
           # ───────────────────────────────────────────────
           #   CONFIG
@@ -61,12 +42,9 @@ jobs:
           M3U_FILENAME  = "zstar.m3u"
           GIST_ID       = os.getenv("GIST_ID")
           GH_TOKEN      = os.getenv("GH_TOKEN")
-          FORCE_UPDATE  = os.getenv("FORCE_UPDATE", "no").lower() == "yes"
-          DRY_RUN       = os.getenv("DRY_RUN", "no").lower() == "yes"
-          USER_AGENT    = "plaYtv/7.1.3 (Linux;Android 13) ygx/69.1 ExoPlayerLib/824.0"
 
           if not GIST_ID or not GH_TOKEN:
-              print("Error: GIST_ID or GH_TOKEN missing.")
+              print("Error: GIST_ID or GH_TOKEN environment variable is missing.")
               sys.exit(1)
 
           HEADERS = {
@@ -74,83 +52,87 @@ jobs:
               "Accept": "application/vnd.github.v3+json"
           }
 
-          # 1. Get fresh cookie
+          # ───────────────────────────────────────────────
+          # 1. Get fresh cookie from worker
+          # ───────────────────────────────────────────────
           try:
               resp = requests.get(WORKER_URL, timeout=12)
               resp.raise_for_status()
+
               match = re.search(r'__hdnea__=([^"\'\s&]+)', resp.text)
               if not match:
-                  print("Error: __hdnea__ not found.")
+                  print("Error: Could not find __hdnea__ in worker response.")
+                  print("Response snippet:", resp.text[:400])
                   sys.exit(1)
+
               cookie_val = match.group(1)
               token_str = f"__hdnea__={cookie_val}"
               print(f"Extracted token: {token_str}")
+
           except Exception as e:
-              print(f"Failed to get cookie: {e}")
+              print(f"Failed to get cookie from worker: {e}")
               sys.exit(1)
 
-          # 2. Download current gist
+          # ───────────────────────────────────────────────
+          # 2. Download current gist content
+          # ───────────────────────────────────────────────
           gist_url = f"https://api.github.com/gists/{GIST_ID}"
           try:
               r = requests.get(gist_url, headers=HEADERS, timeout=10)
               r.raise_for_status()
               gist_data = r.json()
+
               if M3U_FILENAME not in gist_data["files"]:
-                  print(f"File '{M3U_FILENAME}' not found in gist.")
+                  print(f"Error: File '{M3U_FILENAME}' not found in gist.")
                   sys.exit(1)
+
               current_content = gist_data["files"][M3U_FILENAME]["content"]
               lines = current_content.splitlines()
+
           except Exception as e:
               print(f"Failed to read gist: {e}")
               sys.exit(1)
 
-          # 3. Update playlist logic (same as before – fixed slash + user-agent + token)
+          # ───────────────────────────────────────────────
+          # 3. Update links in playlist
+          # ───────────────────────────────────────────────
           updated_lines = []
           updated_count = 0
-          in_channel_block = False
 
           for line in lines:
               stripped = line.strip()
-              if stripped.startswith("#EXTINF:"):
-                  in_channel_block = True
+              if not stripped or stripped.startswith("#"):
                   updated_lines.append(line)
                   continue
 
-              if in_channel_block and stripped.startswith("http"):
-                  # Fix URL: //bpk-tv → /bpk-tv
-                  clean_url = re.sub(r'^//bpk-tv', '/bpk-tv', stripped)
-                  # Remove old token
-                  clean_url = re.sub(r'([?&])__hdnea__=[^&]*', '', clean_url)
-                  sep = "&" if "?" in clean_url else "?"
-                  new_url = f"{clean_url.rstrip()}{sep}{token_str}"
+              if (stripped.startswith("http") and 
+                  (stripped.endswith(".mpd") or ".mpd?" in stripped or 
+                   stripped.endswith(".m3u8") or ".m3u8?" in stripped)):
 
-                  updated_lines.append(f"#EXTVLCOPT:http-user-agent={USER_AGENT}")
+                  # Remove old token if exists
+                  clean = re.sub(r'([?&])__hdnea__=[^&]*', '', stripped)
+                  sep = "&" if "?" in clean else "?"
+                  new_url = f"{clean}{sep}{token_str}"
                   updated_lines.append(new_url)
                   updated_count += 1
-                  in_channel_block = False
-                  continue
+              else:
+                  updated_lines.append(line)
 
-              updated_lines.append(line)
+          print(f"Updated {updated_count} stream URLs.")
 
-          print(f"Would update {updated_count} stream URLs.")
-
+          # ───────────────────────────────────────────────
+          # 4. Update gist (only if changed)
+          # ───────────────────────────────────────────────
           new_content = "\n".join(updated_lines).rstrip() + "\n"
-
-          if new_content == current_content and not FORCE_UPDATE:
-              print("No changes detected (and force_update not enabled).")
+          if new_content == current_content:
+              print("No changes detected in playlist.")
               sys.exit(0)
 
-          if DRY_RUN:
-              print("\nDRY RUN MODE – no changes will be pushed")
-              print("First 300 chars of new content:")
-              print(new_content[:300] + "...")
-              print("\nWould have updated the gist.")
-              sys.exit(0)
-
-          # 4. Update gist
           update_payload = {
               "files": {
-                  M3U_FILENAME: {"content": new_content}
+                  M3U_FILENAME: {
+                      "content": new_content
+                  }
               }
           }
 
