@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_TOKEN }}   # important for gist push + repo push
+          token: ${{ secrets.GH_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Extract Cookie and Update zstar.m3u
+      - name: Extract Cookie and Update app.m3u
         env:
           GIST_ID: ${{ vars.GIST_ID }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -39,7 +39,7 @@ jobs:
           #   CONFIG
           # ───────────────────────────────────────────────
           WORKER_URL    = "https://zstar.pfy.workers.dev"
-          M3U_FILENAME  = "zstar.m3u"
+          M3U_FILENAME  = "app.m3u"
           GIST_ID       = os.getenv("GIST_ID")
           GH_TOKEN      = os.getenv("GH_TOKEN")
 
@@ -94,22 +94,33 @@ jobs:
               sys.exit(1)
 
           # ───────────────────────────────────────────────
-          # 3. Update links in playlist
+          # 3. Update links and EXTHTTP cookies
           # ───────────────────────────────────────────────
           updated_lines = []
           updated_count = 0
 
           for line in lines:
               stripped = line.strip()
+
+              # Keep comments and empty lines
               if not stripped or stripped.startswith("#"):
+                  # Update EXTHTTP cookie lines if present
+                  if '#EXTHTTP:{"cookie":"__hdnea__=' in line:
+                      # Replace the cookie value
+                      new_cookie = f'__hdnea__={cookie_val}'
+                      updated_line = re.sub(r'__hdnea__=[^"]*', new_cookie, line)
+                      updated_lines.append(updated_line)
+                      updated_count += 1
+                      continue
                   updated_lines.append(line)
                   continue
 
+              # Update stream URLs (.mpd or .m3u8)
               if (stripped.startswith("http") and 
                   (stripped.endswith(".mpd") or ".mpd?" in stripped or 
                    stripped.endswith(".m3u8") or ".m3u8?" in stripped)):
 
-                  # Remove old token if exists
+                  # Remove old token if exists in query string
                   clean = re.sub(r'([?&])__hdnea__=[^&]*', '', stripped)
                   sep = "&" if "?" in clean else "?"
                   new_url = f"{clean}{sep}{token_str}"
@@ -118,7 +129,7 @@ jobs:
               else:
                   updated_lines.append(line)
 
-          print(f"Updated {updated_count} stream URLs.")
+          print(f"Updated {updated_count} stream URLs / cookies.")
 
           # ───────────────────────────────────────────────
           # 4. Update gist (only if changed)
@@ -150,6 +161,6 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add zstar.m3u || true
-          git commit -m "chore: refreshed zstar.m3u cookies [skip ci]" || echo "No changes to commit"
+          git add app.m3u || true
+          git commit -m "chore: refreshed app.m3u cookies [skip ci]" || echo "No changes to commit"
           git push || echo "Push not needed"
