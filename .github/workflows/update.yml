@@ -138,3 +138,4 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git add zstar.m3u || true
           git commit -m "chore: refreshed zstar.m3u cookies [skip ci]" || echo "No changes
+git push || echo "Push not needed (or already up to date)"
