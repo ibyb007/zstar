@@ -23,7 +23,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Extract Cookie and Update app.m3u
+      - name: Extract Cookie and Update zstar.m3u
         env:
           GIST_ID: ${{ vars.GIST_ID }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
@@ -33,13 +33,12 @@ jobs:
           import re
           import os
           import sys
-          import json
 
           # ───────────────────────────────────────────────
           #   CONFIG
           # ───────────────────────────────────────────────
           WORKER_URL    = "https://zstar.pfy.workers.dev"
-          M3U_FILENAME  = "app.m3u"
+          M3U_FILENAME  = "zstar.m3u"
           GIST_ID       = os.getenv("GIST_ID")
           GH_TOKEN      = os.getenv("GH_TOKEN")
 
@@ -56,19 +55,17 @@ jobs:
           # 1. Get fresh cookie from worker
           # ───────────────────────────────────────────────
           try:
-              resp = requests.get(WORKER_URL, timeout=12)
+              resp = requests.get(WORKER_URL, timeout=15)
               resp.raise_for_status()
 
               match = re.search(r'__hdnea__=([^"\'\s&]+)', resp.text)
               if not match:
                   print("Error: Could not find __hdnea__ in worker response.")
-                  print("Response snippet:", resp.text[:400])
+                  print("Response snippet:", resp.text[:500])
                   sys.exit(1)
 
               cookie_val = match.group(1)
-              token_str = f"__hdnea__={cookie_val}"
-              print(f"Extracted token: {token_str}")
-
+              print(f"✅ Extracted fresh __hdnea__ token (length: {len(cookie_val)})")
           except Exception as e:
               print(f"Failed to get cookie from worker: {e}")
               sys.exit(1)
@@ -87,54 +84,39 @@ jobs:
                   sys.exit(1)
 
               current_content = gist_data["files"][M3U_FILENAME]["content"]
-              lines = current_content.splitlines()
+              lines = current_content.splitlines(keepends=True)  # preserve original newlines
 
           except Exception as e:
               print(f"Failed to read gist: {e}")
               sys.exit(1)
 
           # ───────────────────────────────────────────────
-          # 3. Update links and EXTHTTP cookies
+          # 3. Update only #EXTHTTP cookie lines
           # ───────────────────────────────────────────────
           updated_lines = []
           updated_count = 0
 
           for line in lines:
-              stripped = line.strip()
-
-              # Keep comments and empty lines
-              if not stripped or stripped.startswith("#"):
-                  # Update EXTHTTP cookie lines if present
-                  if '#EXTHTTP:{"cookie":"__hdnea__=' in line:
-                      # Replace the cookie value
-                      new_cookie = f'__hdnea__={cookie_val}'
-                      updated_line = re.sub(r'__hdnea__=[^"]*', new_cookie, line)
-                      updated_lines.append(updated_line)
-                      updated_count += 1
-                      continue
-                  updated_lines.append(line)
-                  continue
-
-              # Update stream URLs (.mpd or .m3u8)
-              if (stripped.startswith("http") and 
-                  (stripped.endswith(".mpd") or ".mpd?" in stripped or 
-                   stripped.endswith(".m3u8") or ".m3u8?" in stripped)):
-
-                  # Remove old token if exists in query string
-                  clean = re.sub(r'([?&])__hdnea__=[^&]*', '', stripped)
-                  sep = "&" if "?" in clean else "?"
-                  new_url = f"{clean}{sep}{token_str}"
-                  updated_lines.append(new_url)
+              # Match #EXTHTTP lines containing __hdnea__
+              if '#EXTHTTP:{"cookie":"__hdnea__=' in line:
+                  # Replace only the token value safely
+                  new_line = re.sub(
+                      r'(__hdnea__=)[^"]*',
+                      rf'\1{cookie_val}',
+                      line
+                  )
+                  updated_lines.append(new_line)
                   updated_count += 1
               else:
                   updated_lines.append(line)
 
-          print(f"Updated {updated_count} stream URLs / cookies.")
+          print(f"Updated {updated_count} #EXTHTTP cookie entries.")
 
           # ───────────────────────────────────────────────
           # 4. Update gist (only if changed)
           # ───────────────────────────────────────────────
-          new_content = "\n".join(updated_lines).rstrip() + "\n"
+          new_content = "".join(updated_lines).rstrip() + "\n"
+
           if new_content == current_content:
               print("No changes detected in playlist.")
               sys.exit(0)
@@ -150,7 +132,7 @@ jobs:
           try:
               resp = requests.patch(gist_url, headers=HEADERS, json=update_payload, timeout=10)
               resp.raise_for_status()
-              print(f"Successfully updated gist → {M3U_FILENAME}")
+              print(f"✅ Successfully updated gist → {M3U_FILENAME}")
           except Exception as e:
               print(f"Failed to update gist: {e}")
               sys.exit(1)
@@ -161,6 +143,6 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add app.m3u || true
-          git commit -m "chore: refreshed app.m3u cookies [skip ci]" || echo "No changes to commit"
+          git add zstar.m3u || true
+          git commit -m "chore: refreshed zstar.m3u cookies [skip ci]" || echo "No changes to commit"
           git push || echo "Push not needed"
