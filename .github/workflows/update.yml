@@ -3,7 +3,11 @@ name: Update Playlist Cookies
 on:
   schedule:
     - cron: '0 */6 * * *'    # every 6 hours
-  workflow_dispatch:         # manual trigger
+  workflow_dispatch:
+
+# Important: Give write permission to contents
+permissions:
+  contents: write
 
 jobs:
   update-playlist:
@@ -13,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_TOKEN }}
+          token: ${{ secrets.GH_TOKEN }}   # Use your PAT here for better reliability
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -43,7 +47,7 @@ jobs:
           GH_TOKEN      = os.getenv("GH_TOKEN")
 
           if not GIST_ID or not GH_TOKEN:
-              print("Error: GIST_ID or GH_TOKEN environment variable is missing.")
+              print("❌ Error: GIST_ID or GH_TOKEN is missing.")
               sys.exit(1)
 
           HEADERS = {
@@ -51,70 +55,61 @@ jobs:
               "Accept": "application/vnd.github.v3+json"
           }
 
-          # ───────────────────────────────────────────────
           # 1. Get fresh cookie from worker
-          # ───────────────────────────────────────────────
           try:
               resp = requests.get(WORKER_URL, timeout=15)
               resp.raise_for_status()
 
               match = re.search(r'__hdnea__=([^"\'\s&]+)', resp.text)
               if not match:
-                  print("Error: Could not find __hdnea__ in worker response.")
-                  print("Response snippet:", resp.text[:500])
+                  print("❌ Could not find __hdnea__ in worker response.")
+                  print("Response snippet:", resp.text[:600])
                   sys.exit(1)
 
               cookie_val = match.group(1)
               print(f"✅ Extracted fresh __hdnea__ token (length: {len(cookie_val)})")
           except Exception as e:
-              print(f"Failed to get cookie from worker: {e}")
+              print(f"❌ Failed to get cookie from worker: {e}")
               sys.exit(1)
 
-          # ───────────────────────────────────────────────
           # 2. Download current gist content
-          # ───────────────────────────────────────────────
           gist_url = f"https://api.github.com/gists/{GIST_ID}"
           try:
               r = requests.get(gist_url, headers=HEADERS, timeout=10)
               r.raise_for_status()
               gist_data = r.json()
 
-              if M3U_FILENAME not in gist_data["files"]:
-                  print(f"Error: File '{M3U_FILENAME}' not found in gist.")
+              if M3U_FILENAME not in gist_data.get("files", {}):
+                  print(f"❌ File '{M3U_FILENAME}' not found in gist.")
                   sys.exit(1)
 
               current_content = gist_data["files"][M3U_FILENAME]["content"]
-              lines = current_content.splitlines(keepends=True)  # preserve original newlines
+              lines = current_content.splitlines(keepends=True)
 
           except Exception as e:
-              print(f"Failed to read gist: {e}")
+              print(f"❌ Failed to read gist: {e}")
               sys.exit(1)
 
-          # ───────────────────────────────────────────────
-          # 3. Update only #EXTHTTP cookie lines
-          # ───────────────────────────────────────────────
+          # 3. Update __hdnea__ in URLs (most common for JioTV .mpd streams)
           updated_lines = []
           updated_count = 0
 
           for line in lines:
-              # Match #EXTHTTP lines containing __hdnea__
-              if '#EXTHTTP:{"cookie":"__hdnea__=' in line:
-                  # Replace only the token value safely
-                  new_line = re.sub(
-                      r'(__hdnea__=)[^"]*',
-                      rf'\1{cookie_val}',
-                      line
-                  )
-                  updated_lines.append(new_line)
+              stripped = line.strip()
+
+              if stripped.startswith("http") and (".mpd" in stripped or ".m3u8" in stripped):
+                  # Remove any old __hdnea__ token
+                  clean = re.sub(r'([?&])__hdnea__=[^&]*', '', stripped)
+                  sep = "&" if "?" in clean else "?"
+                  new_url = f"{clean}{sep}__hdnea__={cookie_val}"
+                  updated_lines.append(new_url + "\n")
                   updated_count += 1
               else:
                   updated_lines.append(line)
 
-          print(f"Updated {updated_count} #EXTHTTP cookie entries.")
+          print(f"✅ Updated {updated_count} stream URLs with fresh token.")
 
-          # ───────────────────────────────────────────────
-          # 4. Update gist (only if changed)
-          # ───────────────────────────────────────────────
+          # 4. Update gist only if changed
           new_content = "".join(updated_lines).rstrip() + "\n"
 
           if new_content == current_content:
@@ -123,18 +118,16 @@ jobs:
 
           update_payload = {
               "files": {
-                  M3U_FILENAME: {
-                      "content": new_content
-                  }
+                  M3U_FILENAME: {"content": new_content}
               }
           }
 
           try:
               resp = requests.patch(gist_url, headers=HEADERS, json=update_payload, timeout=10)
               resp.raise_for_status()
-              print(f"✅ Successfully updated gist → {M3U_FILENAME}")
+              print(f"✅ Successfully updated Gist → {M3U_FILENAME}")
           except Exception as e:
-              print(f"Failed to update gist: {e}")
+              print(f"❌ Failed to update gist: {e}")
               sys.exit(1)
 
           EOF
@@ -144,5 +137,4 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add zstar.m3u || true
-          git commit -m "chore: refreshed zstar.m3u cookies [skip ci]" || echo "No changes to commit"
-          git push || echo "Push not needed"
+          git commit -m "chore: refreshed zstar.m3u cookies [skip ci]" || echo "No changes
